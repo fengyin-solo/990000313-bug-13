@@ -16,11 +16,20 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useLinksStore } from '../stores/links'
 
 const linksStore = useLinksStore()
 const searchText = ref(linksStore.searchQuery)
+
+// Keep the input in sync when the query changes elsewhere
+// (clear all, closing the filter tag, restoring from the URL)
+watch(
+  () => linksStore.searchQuery,
+  (val) => {
+    searchText.value = val
+  }
+)
 
 function handleSearch() {
   linksStore.setSearch(searchText.value)

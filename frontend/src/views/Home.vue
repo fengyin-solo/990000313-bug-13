@@ -16,7 +16,7 @@
 
         <div class="active-filters" v-if="linksStore.selectedCategory || linksStore.selectedTag || linksStore.searchQuery">
           <span class="filter-label">当前筛选:</span>
-          <el-tag v-if="linksStore.searchQuery" closable @close="linksStore.clearFilters()">
+          <el-tag v-if="linksStore.searchQuery" closable @close="linksStore.setSearch('')">
             搜索: {{ linksStore.searchQuery }}
           </el-tag>
           <el-tag v-if="activeCategoryName" type="success" closable @close="linksStore.setCategory(null)">
@@ -28,6 +28,19 @@
           <el-button type="primary" link @click="linksStore.clearFilters()">清除全部</el-button>
         </div>
 
+        <el-alert
+          v-if="linksStore.fetchError"
+          :title="linksStore.fetchError"
+          type="error"
+          show-icon
+          :closable="false"
+          class="fetch-error"
+        >
+          <template #default>
+            <el-button size="small" @click="handleRetry">重试</el-button>
+          </template>
+        </el-alert>
+
         <div v-loading="linksStore.loading" class="links-grid">
           <LinkCard
             v-for="link in linksStore.links"
@@ -35,6 +48,7 @@
             :link="link"
             @edit="handleEdit"
             @delete="handleDelete"
+            @tag-click="linksStore.setTag"
           />
         </div>
 
@@ -48,7 +62,10 @@
           />
         </div>
 
-        <el-empty v-if="!linksStore.loading && linksStore.links.length === 0" description="暂无链接" />
+        <el-empty
+          v-if="!linksStore.loading && !linksStore.fetchError && linksStore.links.length === 0"
+          :description="emptyDescription"
+        />
       </main>
     </div>
 
@@ -61,7 +78,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { useLinksStore } from '../stores/links'
 import CategorySidebar from '../components/CategorySidebar.vue'
@@ -71,6 +89,8 @@ import LinkCard from '../components/LinkCard.vue'
 import LinkForm from '../components/LinkForm.vue'
 
 const linksStore = useLinksStore()
+const route = useRoute()
+const router = useRouter()
 
 const formVisible = ref(false)
 const editingLink = ref(null)
@@ -81,11 +101,58 @@ const activeCategoryName = computed(() => {
   return cat?.name
 })
 
+const hasActiveFilters = computed(
+  () => !!(linksStore.searchQuery || linksStore.selectedCategory || linksStore.selectedTag)
+)
+
+const emptyDescription = computed(() =>
+  hasActiveFilters.value
+    ? '没有找到匹配的链接，请调整搜索词或筛选条件'
+    : '暂无链接，点击右上角「添加链接」开始收藏'
+)
+
 onMounted(() => {
-  linksStore.fetchLinks()
+  const { search, category, tag, page } = route.query
+  const hasQuery =
+    search !== undefined || category !== undefined || tag !== undefined || page !== undefined
+
+  if (hasQuery) {
+    // Deep link / refresh: the URL is the source of truth
+    linksStore.applyQuery({ search, category, tag })
+    linksStore.fetchLinks(Math.max(1, parseInt(page, 10) || 1))
+  } else {
+    // Navigating back from another page: keep the previous list state
+    linksStore.fetchLinks(linksStore.currentPage)
+  }
   linksStore.fetchCategories()
   linksStore.fetchTags()
 })
+
+// Reflect list state in the URL so refresh and back/forward restore the same
+// page, keyword and filters
+watch(
+  () => [
+    linksStore.currentPage,
+    linksStore.searchQuery,
+    linksStore.selectedCategory,
+    linksStore.selectedTag,
+  ],
+  ([page, search, category, tag]) => {
+    const query = {}
+    if (search) query.search = search
+    if (category != null) query.category = String(category)
+    if (tag) query.tag = tag
+    if (page > 1) query.page = String(page)
+
+    const current = route.query
+    const same =
+      Object.keys(query).length === Object.keys(current).length &&
+      Object.keys(query).every((k) => current[k] === query[k])
+    if (!same) {
+      router.replace({ query })
+    }
+  }
+)
 
 function showAddDialog() {
   editingLink.value = null
@@ -118,6 +185,10 @@ function handleSaved() {
 
 function handlePageChange(page) {
   linksStore.fetchLinks(page)
+}
+
+function handleRetry() {
+  linksStore.fetchLinks(linksStore.currentPage)
 }
 </script>
 
@@ -165,6 +236,10 @@ function handlePageChange(page) {
 .filter-label {
   font-size: 14px;
   color: #606266;
+}
+
+.fetch-error {
+  margin-bottom: 16px;
 }
 
 .links-grid {

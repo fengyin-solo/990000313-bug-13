@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { linksApi, categoriesApi, tagsApi } from '../api'
 
+const PAGE_SIZE = 12
+
 export const useLinksStore = defineStore('links', () => {
   const links = ref([])
   const categories = ref([])
@@ -10,33 +12,58 @@ export const useLinksStore = defineStore('links', () => {
   const currentPage = ref(1)
   const totalPages = ref(1)
   const loading = ref(false)
+  const fetchError = ref('')
 
   // Filters
   const selectedCategory = ref(null)
   const selectedTag = ref(null)
   const searchQuery = ref('')
 
+  // Page the user was on before a search started; restored when it is cleared
+  let pageBeforeSearch = 1
+  // Sequence id so only the latest request applies its result. Without this a
+  // slow earlier request (e.g. a search) can overwrite a newer one (e.g. the
+  // unfiltered list after clearing the box) and leave stale results on screen.
+  let fetchSeq = 0
+
   async function fetchLinks(page = 1) {
+    const seq = ++fetchSeq
     loading.value = true
+    fetchError.value = ''
     try {
       const params = {
         page,
-        limit: 12,
+        limit: PAGE_SIZE,
       }
       if (selectedCategory.value) params.category = selectedCategory.value
       if (selectedTag.value) params.tag = selectedTag.value
-      if (searchQuery.value) params.search = searchQuery.value
+      const keyword = searchQuery.value.trim()
+      if (keyword) params.search = keyword
 
       const response = await linksApi.getLinks(params)
-      links.value = response.data.links
-      total.value = response.data.total
-      currentPage.value = response.data.page
-      totalPages.value = response.data.totalPages
+      if (seq !== fetchSeq) return // a newer request is in flight; drop this stale result
+
+      let data = response.data
+      // Requested page no longer exists (items deleted, filters changed):
+      // fall back to the last available page instead of showing a blank list
+      if (data.links.length === 0 && data.total > 0 && data.page > 1) {
+        const lastPage = Math.ceil(data.total / PAGE_SIZE)
+        const retry = await linksApi.getLinks({ ...params, page: lastPage })
+        if (seq !== fetchSeq) return
+        data = retry.data
+      }
+
+      links.value = data.links
+      total.value = data.total
+      currentPage.value = data.page
+      totalPages.value = data.totalPages
     } catch (error) {
+      if (seq !== fetchSeq) return
       console.error('Failed to fetch links:', error)
-      throw error
+      // Keep the previous list on screen; the view shows a retryable error
+      fetchError.value = '链接加载失败，请检查网络后重试'
     } finally {
-      loading.value = false
+      if (seq === fetchSeq) loading.value = false
     }
   }
 
@@ -105,25 +132,46 @@ export const useLinksStore = defineStore('links', () => {
   function setCategory(categoryId) {
     selectedCategory.value = categoryId
     selectedTag.value = null
+    pageBeforeSearch = 1
     fetchLinks(1)
   }
 
   function setTag(tag) {
     selectedTag.value = tag
     selectedCategory.value = null
+    pageBeforeSearch = 1
     fetchLinks(1)
   }
 
   function setSearch(query) {
-    searchQuery.value = query
-    fetchLinks(1)
+    const keyword = (query || '').trim()
+    if (keyword === searchQuery.value) return
+    if (!searchQuery.value && keyword) {
+      // Entering a search: remember where the unfiltered list was
+      pageBeforeSearch = currentPage.value
+    }
+    searchQuery.value = keyword
+    // Clearing the search returns to the page and order from before it
+    fetchLinks(keyword ? 1 : pageBeforeSearch)
   }
 
   function clearFilters() {
     selectedCategory.value = null
     selectedTag.value = null
     searchQuery.value = ''
+    pageBeforeSearch = 1
     fetchLinks(1)
+  }
+
+  // Restore filter state from the route query without fetching (the caller
+  // triggers fetchLinks with the right page afterwards)
+  function applyQuery({ search, category, tag } = {}) {
+    const categoryId = Number(category)
+    searchQuery.value = (search || '').trim()
+    selectedCategory.value =
+      category != null && category !== '' && Number.isInteger(categoryId) ? categoryId : null
+    selectedTag.value = tag || null
+    pageBeforeSearch = 1
   }
 
   return {
@@ -134,6 +182,7 @@ export const useLinksStore = defineStore('links', () => {
     currentPage,
     totalPages,
     loading,
+    fetchError,
     selectedCategory,
     selectedTag,
     searchQuery,
@@ -150,5 +199,6 @@ export const useLinksStore = defineStore('links', () => {
     setTag,
     setSearch,
     clearFilters,
+    applyQuery,
   }
 })

@@ -9,9 +9,13 @@ router.use(authMiddleware);
 
 // GET /api/links - List links with pagination, filtering, search
 router.get('/', (req, res) => {
-  const { page = 1, limit = 12, category, tag, search } = req.query;
-  const offset = (page - 1) * limit;
+  const { category, tag, search } = req.query;
   const userId = req.userId;
+
+  // Validate pagination so count and list queries always use the same criteria
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 12));
+  const offset = (page - 1) * limit;
 
   const db = getDb();
 
@@ -23,9 +27,15 @@ router.get('/', (req, res) => {
     params.push(category);
   }
 
-  if (search) {
-    whereConditions.push('(l.title LIKE ? OR l.description LIKE ? OR l.url LIKE ?)');
-    const searchPattern = `%${search}%`;
+  // Normalize the keyword once: trim + case-insensitive, and escape LIKE
+  // wildcards so "50%" or "a_b" match literally instead of acting as patterns
+  const keyword = typeof search === 'string' ? search.trim().toLowerCase() : '';
+  if (keyword) {
+    const escaped = keyword.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    const searchPattern = `%${escaped}%`;
+    whereConditions.push(
+      "(LOWER(l.title) LIKE ? ESCAPE '\\' OR LOWER(l.description) LIKE ? ESCAPE '\\' OR LOWER(l.url) LIKE ? ESCAPE '\\')"
+    );
     params.push(searchPattern, searchPattern, searchPattern);
   }
 
@@ -38,21 +48,22 @@ router.get('/', (req, res) => {
 
   const whereClause = whereConditions.join(' AND ');
 
-  // Get total count
+  // Get total count (same WHERE as the list query)
   const countSql = `SELECT COUNT(DISTINCT l.id) as total FROM links l ${joinClause} WHERE ${whereClause}`;
   const { total } = db.prepare(countSql).get(...params);
 
-  // Get links
+  // Get links. created_at ties (bulk imports share a timestamp) fall back to
+  // id so pagination order is deterministic and stable across requests.
   const sql = `
     SELECT DISTINCT l.*, c.name as category_name, c.color as category_color
     FROM links l
     LEFT JOIN categories c ON l.category_id = c.id
     ${joinClause}
     WHERE ${whereClause}
-    ORDER BY l.created_at DESC
+    ORDER BY l.created_at DESC, l.id DESC
     LIMIT ? OFFSET ?
   `;
-  const links = db.prepare(sql).all(...params, Number(limit), Number(offset));
+  const links = db.prepare(sql).all(...params, limit, offset);
 
   // Get tags for each link
   const getTagsStmt = db.prepare('SELECT tag FROM link_tags WHERE link_id = ?');
@@ -64,7 +75,7 @@ router.get('/', (req, res) => {
   res.json({
     links: linksWithTags,
     total,
-    page: Number(page),
+    page,
     totalPages: Math.ceil(total / limit),
   });
 });
@@ -118,9 +129,12 @@ router.post('/', (req, res) => {
 // GET /api/links/read-later - Get read later list with filtering
 // NOTE: This must come BEFORE /:id routes to avoid being matched as an id
 router.get('/read-later', (req, res) => {
-  const { page = 1, limit = 12, status = 'pending' } = req.query;
-  const offset = (page - 1) * limit;
+  const { status = 'pending' } = req.query;
   const userId = req.userId;
+
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 12));
+  const offset = (page - 1) * limit;
 
   const db = getDb();
 
@@ -147,18 +161,19 @@ router.get('/read-later', (req, res) => {
     FROM links l
     LEFT JOIN categories c ON l.category_id = c.id
     WHERE ${whereClause}
-    ORDER BY 
-      CASE l.review_status 
-        WHEN 'pending' THEN 1 
-        WHEN 'completed' THEN 2 
-        ELSE 3 
+    ORDER BY
+      CASE l.review_status
+        WHEN 'pending' THEN 1
+        WHEN 'completed' THEN 2
+        ELSE 3
       END,
       l.review_date IS NULL,
       l.review_date ASC,
-      l.created_at DESC
+      l.created_at DESC,
+      l.id DESC
     LIMIT ? OFFSET ?
   `;
-  const links = db.prepare(sql).all(...params, Number(limit), Number(offset));
+  const links = db.prepare(sql).all(...params, limit, offset);
 
   // Get tags for each link
   const getTagsStmt = db.prepare('SELECT tag FROM link_tags WHERE link_id = ?');
@@ -191,7 +206,7 @@ router.get('/read-later', (req, res) => {
   res.json({
     links: linksWithTags,
     total,
-    page: Number(page),
+    page,
     totalPages: Math.ceil(total / limit),
     stats
   });
