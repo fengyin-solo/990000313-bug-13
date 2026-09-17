@@ -16,7 +16,7 @@
 
         <div class="active-filters" v-if="linksStore.selectedCategory || linksStore.selectedTag || linksStore.searchQuery">
           <span class="filter-label">当前筛选:</span>
-          <el-tag v-if="linksStore.searchQuery" closable @close="linksStore.clearFilters()">
+          <el-tag v-if="linksStore.searchQuery" closable @close="linksStore.clearSearch()">
             搜索: {{ linksStore.searchQuery }}
           </el-tag>
           <el-tag v-if="activeCategoryName" type="success" closable @close="linksStore.setCategory(null)">
@@ -38,7 +38,20 @@
           />
         </div>
 
-        <div class="pagination" v-if="linksStore.totalPages > 1">
+        <div v-if="linksStore.error" class="fetch-error">
+          <el-alert
+            :title="linksStore.error"
+            type="error"
+            show-icon
+            :closable="false"
+          >
+            <el-button type="primary" size="small" :loading="linksStore.loading" @click="linksStore.retryFetch()">
+              重试
+            </el-button>
+          </el-alert>
+        </div>
+
+        <div class="pagination" v-if="!linksStore.error && linksStore.totalPages > 1">
           <el-pagination
             v-model:current-page="linksStore.currentPage"
             :page-size="12"
@@ -48,7 +61,10 @@
           />
         </div>
 
-        <el-empty v-if="!linksStore.loading && linksStore.links.length === 0" description="暂无链接" />
+        <el-empty
+          v-if="!linksStore.loading && !linksStore.error && linksStore.links.length === 0"
+          :description="emptyDescription"
+        />
       </main>
     </div>
 
@@ -61,7 +77,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { useLinksStore } from '../stores/links'
 import CategorySidebar from '../components/CategorySidebar.vue'
@@ -71,6 +88,7 @@ import LinkCard from '../components/LinkCard.vue'
 import LinkForm from '../components/LinkForm.vue'
 
 const linksStore = useLinksStore()
+const route = useRoute()
 
 const formVisible = ref(false)
 const editingLink = ref(null)
@@ -81,10 +99,46 @@ const activeCategoryName = computed(() => {
   return cat?.name
 })
 
+const hasActiveFilter = computed(
+  () => Boolean(linksStore.selectedCategory || linksStore.selectedTag || linksStore.searchQuery)
+)
+
+const emptyDescription = computed(() => {
+  if (linksStore.searchQuery) {
+    return `没有找到与 “${linksStore.searchQuery}” 匹配的链接，换个关键词试试`
+  }
+  if (hasActiveFilter.value) {
+    return '当前筛选条件下没有链接'
+  }
+  return '暂无链接'
+})
+
+// Load the list according to the URL query so deep links, refresh and browser
+// back/forward restore the same page, sort position and filters.
+let initialized = false
+function loadFromRoute() {
+  const changed = linksStore.applyQuery(route.query)
+  // Store actions already trigger their own fetch after rewriting the URL;
+  // in that case applyQuery finds no diff and we must not double-fetch.
+  if (changed || !initialized) {
+    initialized = true
+    linksStore.fetchLinks(linksStore.currentPage)
+  }
+}
+
+const stopRouteWatch = watch(
+  () => route.query,
+  () => loadFromRoute()
+)
+
 onMounted(() => {
-  linksStore.fetchLinks()
+  loadFromRoute()
   linksStore.fetchCategories()
   linksStore.fetchTags()
+})
+
+onBeforeUnmount(() => {
+  stopRouteWatch()
 })
 
 function showAddDialog() {
@@ -117,7 +171,7 @@ function handleSaved() {
 }
 
 function handlePageChange(page) {
-  linksStore.fetchLinks(page)
+  linksStore.setPage(page)
 }
 </script>
 
@@ -178,5 +232,16 @@ function handlePageChange(page) {
   margin-top: 24px;
   display: flex;
   justify-content: center;
+}
+
+.fetch-error {
+  margin: 16px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.fetch-error :deep(.el-alert) {
+  width: 100%;
+  max-width: 480px;
 }
 </style>

@@ -7,52 +7,80 @@ const router = express.Router();
 // All routes require authentication
 router.use(authMiddleware);
 
+const PAGE_SIZE = 12;
+
+// Normalize raw user search input: trim edges and collapse runs of whitespace.
+// Returns '' for blank input so callers can treat it as "no search".
+function normalizeSearch(raw) {
+  if (raw === undefined || raw === null) return '';
+  return String(raw).trim().replace(/\s+/g, ' ');
+}
+
 // GET /api/links - List links with pagination, filtering, search
 router.get('/', (req, res) => {
-  const { page = 1, limit = 12, category, tag, search } = req.query;
-  const offset = (page - 1) * limit;
+  let { page = 1, limit = PAGE_SIZE, category, tag, search } = req.query;
   const userId = req.userId;
-
   const db = getDb();
 
-  let whereConditions = ['l.user_id = ?'];
-  let params = [userId];
+  // Validate / normalize pagination params
+  page = Math.max(1, parseInt(page, 10) || 1);
+  limit = Math.min(100, Math.max(1, parseInt(limit, 10) || PAGE_SIZE));
+
+  const whereConditions = ['l.user_id = ?'];
+  const params = [userId];
 
   if (category) {
     whereConditions.push('l.category_id = ?');
     params.push(category);
   }
 
-  if (search) {
-    whereConditions.push('(l.title LIKE ? OR l.description LIKE ? OR l.url LIKE ?)');
-    const searchPattern = `%${search}%`;
-    params.push(searchPattern, searchPattern, searchPattern);
+  // Same normalization the client uses, so the API is consistent when called directly.
+  // Case-insensitive matching is enforced with LOWER(); whitespace inside the query
+  // splits into AND-combined terms; tags are searched as well as title/description/url.
+  const normalizedSearch = normalizeSearch(search);
+  if (normalizedSearch) {
+    const terms = normalizedSearch.split(' ');
+    terms.forEach((term) => {
+      const pattern = `%${term.toLowerCase().replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+      whereConditions.push(`(
+        LOWER(l.title) LIKE ? ESCAPE '\\'
+        OR LOWER(l.description) LIKE ? ESCAPE '\\'
+        OR LOWER(l.url) LIKE ? ESCAPE '\\'
+        OR EXISTS (SELECT 1 FROM link_tags lt2 WHERE lt2.link_id = l.id AND LOWER(lt2.tag) LIKE ? ESCAPE '\\')
+      )`);
+      params.push(pattern, pattern, pattern, pattern);
+    });
   }
 
-  let joinClause = '';
+  // Filter tags via EXISTS instead of JOIN so matching rows can never be duplicated.
   if (tag) {
-    joinClause = 'INNER JOIN link_tags lt ON l.id = lt.link_id';
-    whereConditions.push('lt.tag = ?');
+    whereConditions.push('EXISTS (SELECT 1 FROM link_tags lt WHERE lt.link_id = l.id AND lt.tag = ?)');
     params.push(tag);
   }
 
   const whereClause = whereConditions.join(' AND ');
 
   // Get total count
-  const countSql = `SELECT COUNT(DISTINCT l.id) as total FROM links l ${joinClause} WHERE ${whereClause}`;
+  const countSql = `SELECT COUNT(*) as total FROM links l WHERE ${whereClause}`;
   const { total } = db.prepare(countSql).get(...params);
 
-  // Get links
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  // Clamp out-of-range pages (e.g. filter narrowed the result set) to the last page
+  if (page > totalPages) page = totalPages;
+  const offset = (page - 1) * limit;
+
+  // created_at is not unique (bulk imports share one timestamp), so l.id is a
+  // required tiebreaker: without it tie ordering is plan-dependent and links
+  // can show up on two pages or be skipped.
   const sql = `
-    SELECT DISTINCT l.*, c.name as category_name, c.color as category_color
+    SELECT l.*, c.name as category_name, c.color as category_color
     FROM links l
     LEFT JOIN categories c ON l.category_id = c.id
-    ${joinClause}
     WHERE ${whereClause}
-    ORDER BY l.created_at DESC
+    ORDER BY l.created_at DESC, l.id DESC
     LIMIT ? OFFSET ?
   `;
-  const links = db.prepare(sql).all(...params, Number(limit), Number(offset));
+  const links = db.prepare(sql).all(...params, limit, offset);
 
   // Get tags for each link
   const getTagsStmt = db.prepare('SELECT tag FROM link_tags WHERE link_id = ?');
@@ -64,8 +92,8 @@ router.get('/', (req, res) => {
   res.json({
     links: linksWithTags,
     total,
-    page: Number(page),
-    totalPages: Math.ceil(total / limit),
+    page,
+    totalPages,
   });
 });
 
